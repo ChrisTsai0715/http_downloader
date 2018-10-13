@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <string>
 #include <stdexcept>
+#include <map>
 
 #include "reference/IReference.h"
 #include "thread/BaseThread.h"
@@ -26,8 +27,11 @@ public:
 
 	typedef enum
 	{
-		STATE_BEGIN = 0,
+		STATE_INIT = 0,
+		STATE_PROCESS,
 		STATE_COMPLETE,
+		STATE_PAUSE,
+		STATE_CANCEL,
 		STATE_ERROR,
 	}e_state;
 
@@ -45,6 +49,9 @@ public:
 	// Parameter: uint8_t id 下载id。作用为同时下载多个文件时，区分每个回调的序号
 	//************************************
 	virtual bool download(const std::string &url, const std::string &file_name, bool is_cont = false, uint8_t id = 0);
+	virtual bool pause(id_t id);
+	virtual bool resume(id_t id);
+	virtual bool cancel(id_t id);
 	virtual bool ThreadLoop();
 
 public:
@@ -57,7 +64,7 @@ protected:
 	class download_item : public http::call_class
 	{
 	public:
-		download_item(FILE *f, const std::string &url, size_t range_begin, size_t range_end, uint8_t id);
+		download_item(const std::string &url, size_t range_begin, size_t range_end, uint8_t id);
 
 		virtual ~download_item();
 
@@ -68,7 +75,6 @@ protected:
 
 	public:
 		CRefObj<IBuffer> recv_buffer;
-		FILE *_f;
 		size_t total_len;
 		size_t offset;
 		std::string _url;
@@ -91,12 +97,25 @@ private:
 		size_t total_len;
 	}wbuffer_def;
 
-private:
-	sem_queue<CRefObj<wbuffer_def>> _buffer_queue;
-	size_t _down_size;
+	typedef struct  
+	{
+		std::string url;
+		std::string file_name;
+		FILE *f;
+		e_state state;
+		size_t offset;
+	}down_info;
 
 private:
 	void http_handler(download_item *p);
+
+private:
+	sem_queue<CRefObj<wbuffer_def>> _buffer_queue;
+	size_t _down_size;
+	std::map<id_t, down_info> _down_infos;
+	CMutexLock _mutex;
+
+	friend class download_item;
 };
 
 
