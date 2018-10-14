@@ -30,8 +30,10 @@ public:
 		STATE_INIT = 0,
 		STATE_PROCESS,
 		STATE_COMPLETE,
-		STATE_PAUSE,
-		STATE_CANCEL,
+		STATE_WAIT_PAUSE,
+		STATE_WAIT_CANCEL,
+		STATE_PAUSED,
+		STATE_CANCELED,
 		STATE_ERROR,
 	}e_state;
 
@@ -91,7 +93,6 @@ private:
 	typedef struct _wbuffer_def : public CReference
 	{
 		CRefObj<IBuffer> buffer;
-		FILE *f;
 		size_t offset;
 		id_t id;
 		size_t total_len;

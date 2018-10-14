@@ -55,12 +55,17 @@ bool http_downloader::download(const std::string &url, const std::string &file_n
 
 bool http_downloader::pause(id_t id)
 {
-	CAutoLockEx<CMutexLock> cslock(_mutex);
-	if (_down_infos.find(id) == _down_infos.end()) 
-		return false;
+	{
+		CAutoLockEx<CMutexLock> cslock(_mutex);
+		if (_down_infos.find(id) == _down_infos.end())
+			return false;
 
-	_down_infos[id].state = STATE_PAUSE;
+		auto& info = _down_infos[id];
+		if (info.state == STATE_PAUSED) return true;
+		info.state = STATE_WAIT_PAUSE;
+	}
 
+	state_signal.emit(id, STATE_WAIT_PAUSE);
 	return true;
 }
 
@@ -71,7 +76,7 @@ bool http_downloader::resume(id_t id)
 		return false;
 
 	auto& info = _down_infos[id];
-	if (info.state != STATE_PAUSE) return false;
+	if (info.state != STATE_WAIT_PAUSE || info.state != STATE_PAUSED) return false;
 	info.state = STATE_PROCESS;
 
 	size_t b_pos = info.offset;
@@ -84,13 +89,24 @@ bool http_downloader::resume(id_t id)
 
 bool http_downloader::cancel(id_t id)
 {
-	CAutoLockEx<CMutexLock> cslock(_mutex);
+	_mutex.Lock();
 	if (_down_infos.find(id) == _down_infos.end()) 
 		return false;
 	
 	auto& info = _down_infos[id];
-	info.state = STATE_CANCEL;
+	if (info.state == STATE_PAUSED)
+	{
+		//如果先前的状态已经是PAUSED状态，则直接关闭文件
+		fclose(info.f);
+		info.f = NULL;
+		_down_infos.erase(id);
+		_mutex.Unlock();
+		state_signal.emit(id, STATE_CANCELED);
+		return true;
+	}
 
+	info.state = STATE_WAIT_CANCEL;
+	_mutex.Unlock();
 	return true;
 }
 
@@ -98,6 +114,7 @@ bool http_downloader::ThreadLoop()
 {
 	CRefObj<wbuffer_def> wbuffer;
 	e_state state = STATE_PROCESS;
+	FILE *f = NULL;
 	if (_buffer_queue.pop_timedwait(wbuffer, 200) == sem_queue<CRefObj<IBuffer>>::OK)
 	{
 		{
@@ -108,13 +125,43 @@ bool http_downloader::ThreadLoop()
 			}
 			auto& info = _down_infos[wbuffer->id];
 			state = info.state;
+			f = info.f;
+
+			if (state == STATE_PAUSED)
+			{
+				//如果状态为PAUSED，则直接返回，不进行处理
+				return true;
+			}
+			else if (state == STATE_WAIT_PAUSE)
+			{
+				//如果状态为PAUSE，则先冲刷缓冲区,且把当前的offset保存起来，以便后续resume的时候使用.并不再发送进度信息
+				fflush(f);
+				info.offset = wbuffer->offset;
+				//将状态修改为PAUSED
+				info.state = STATE_PAUSED;
+				state_signal.emit(wbuffer->id, STATE_PAUSED);
+				return true;
+			}
+			else if (state == STATE_WAIT_CANCEL)
+			{
+				//如果状态为WAIT_CANCEL，则关闭文件句柄,删除_down_infos中的键值对，并不再发送进度信息
+				if (info.f != NULL)
+				{
+					//判断是否已经被关闭，文件句柄失效
+					fclose(info.f);
+				}
+				_down_infos.erase(wbuffer->id);
+
+				state_signal.emit(wbuffer->id, STATE_CANCELED);
+				return true;
+			}
 		}
 
 		size_t wsize = 0;
 		do
 		{
-			fseek(wbuffer->f, wbuffer->offset, SEEK_SET);
-			int tmp_size = fwrite((char*)wbuffer->buffer->GetPointer() + wsize, sizeof(char), wbuffer->buffer->GetSize() - wsize, wbuffer->f);
+			fseek(f, wbuffer->offset, SEEK_SET);
+			int tmp_size = fwrite((char*)wbuffer->buffer->GetPointer() + wsize, sizeof(char), wbuffer->buffer->GetSize() - wsize, f);
 			if (tmp_size < 0)
 			{
 				state_signal.emit(wbuffer->id, STATE_ERROR);
@@ -127,25 +174,7 @@ bool http_downloader::ThreadLoop()
 		if (wbuffer->offset + wbuffer->buffer->GetSize() == wbuffer->total_len)
 		{
 			state_signal.emit(wbuffer->id, STATE_COMPLETE);
-			fclose(wbuffer->f);
-			return true;
-		}
-
-		if (state == STATE_PAUSE)
-		{
-			//如果状态为PAUSE，则先冲刷缓冲区,并不再发送进度信息
-			fflush(wbuffer->f);
-			state_signal.emit(wbuffer->id, STATE_PAUSE);
-			return true;
-		}
-		else if (state == STATE_CANCEL)
-		{
-			//如果状态为CANCEL，则关闭文件句柄,删除_down_infos中的键值对，并不再发送进度信息
-			fclose(wbuffer->f);
-			CAutoLockEx<CMutexLock> cslock(_mutex);
-			_down_infos.erase(wbuffer->id);
-
-			state_signal.emit(wbuffer->id, STATE_CANCEL);
+			fclose(f);
 			return true;
 		}
 
@@ -170,22 +199,20 @@ void http_downloader::http_handler(download_item *p)
 		info.offset = p->offset;
 	}
 
-	if (state == STATE_PAUSE || state == STATE_ERROR)
+	if (state == STATE_WAIT_PAUSE || state == STATE_ERROR || state == STATE_WAIT_CANCEL)
 	{
-		//如果状态为PAUSE或ERROR，则刷新f的缓冲区，且不请求下一包
-		fflush(f);
+		//如果状态为PAUSE或ERROR，不请求下一包
 		return;
 	}
 
 	CRefObj<wbuffer_def> wbuffer = new wbuffer_def;
-	wbuffer->f = f;
 	wbuffer->buffer = p->recv_buffer;
 	wbuffer->offset = p->offset;
 	wbuffer->total_len = p->total_len;
 	wbuffer->id = p->get_id();
 	_buffer_queue.push(wbuffer);
 
-	//如果当前状态不是PROCESS,则不进行下一包的请求
+	//未完成全部下载，继续请求下一包数据
 	if (!p->is_complete)
 	{
 		size_t b_pos = p->offset + p->recv_buffer->GetSize();
