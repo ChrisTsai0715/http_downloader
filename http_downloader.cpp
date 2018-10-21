@@ -199,7 +199,7 @@ void http_downloader::http_handler(download_item *p)
 		info.offset = p->offset;
 	}
 
-	if (state == STATE_WAIT_PAUSE || state == STATE_ERROR || state == STATE_WAIT_CANCEL)
+	if (state == STATE_PAUSED || state == STATE_ERROR || state == STATE_CANCELED)
 	{
 		//如果状态为PAUSE或ERROR，不请求下一包
 		return;
@@ -343,12 +343,16 @@ int main(int argc, char **argv)
 	http_downloader down;
 	down_callback callback(&down);
 	down.download("http://download.oray.com/sunlogin/windows/SunloginRemote3.6.exe", "D:/test.exe");
-	down.download("http://download.oray.com/sunlogin/windows/SunloginRemote3.6.exe", "D:/test2.exe", 2);
-	down.download("http://download.oray.com/sunlogin/windows/SunloginRemote3.6.exe", "D:/test3.exe", 3);
+	//down.download("http://download.oray.com/sunlogin/windows/SunloginRemote3.6.exe", "D:/test2.exe", false, 2);
+	//down.download("http://download.oray.com/sunlogin/windows/SunloginRemote3.6.exe", "D:/test3.exe", false, 3);
 
+	Sleep(300);
+	down.cancel(0);
 	while (1)
 	{
-		Sleep(1000);
+		int id;
+		scanf("%d", &id);
+		down.cancel(id);
 	}
 
 	http::uninitialize();
